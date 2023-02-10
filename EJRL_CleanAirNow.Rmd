@@ -1,0 +1,184 @@
+---
+title: "R Purple Air Example"
+author: "Brandyn Ruiz"
+date: "2/10/2023"
+output: html_document
+---
+
+```{r}
+library(RSQLite)
+library(DBI)
+library(tidyverse)
+library(lubridate)
+library(NatParksPalettes) #another color palette
+library(AirSensor)
+library(openair)
+```
+
+```{r DB Read}
+# Del Amo and Pacoima DB read
+
+con <- dbConnect(RSQLite::SQLite(), "C:/Users/bcruiz/OneDrive - University of Southern California/PB/PurpleAir/DelAmo_PurpleAir.db")
+
+DelAmo <- dbReadTable(con, 'DelAmo_CASPER') %>% 
+  mutate(Timestamp = as.POSIXct(Timestamp))
+
+Pacoima <- dbReadTable(con, 'Pacoima_CASPER')%>% 
+  mutate(Timestamp = as.POSIXct(Timestamp))
+
+EPA_710 <- dbReadTable(con, 'EPA_SCAQMD') %>% 
+  mutate(Timestamp = as.POSIXct(paste(date_local, time_local, sep = " ")))
+#Data available until 2022-09-30
+
+dbDisconnect(con)
+
+```
+
+# Calendar Plots
+
+```{r}
+calendar_2021_DelAmo <- DelAmo %>% 
+  select(Timestamp, Value) %>% 
+  rename("date" = 1, "pm25" = 2) %>% 
+  timeAverage(avg.time = "day") %>%
+  calendarPlot(pollutant = "pm25",
+               year = 2021,
+               data.thresh = 5,
+               w.shift = 1,
+               main = "PM 2.5 Daily Averages in 2021, Del Amo",
+               limits = c(0, 60),
+               key.header = expression(paste("PM2.5 ", group("[", mu*g/{m^3}, "]"))))
+
+# saves jpeg picture of calendar plot into folder
+jpeg(file = "FiguresCasper/yearplotDelAmo_2021.jpeg",  width = 13, height = 8, units = 'in', res = 300)
+calendar_2021_DelAmo
+dev.off()
+
+```
+
+# Bar Charts
+
+```{r}
+Pacoima_dailyAvg <- Pacoima %>%
+  select(Monitor_Name, Timestamp, Value) %>%
+  filter(Timestamp < "2023-01-01") %>%
+  rename("date" = Timestamp, "pm25" = Value) %>%
+  timeAverage(avg.time = "day", type = c("Monitor_Name")) %>%
+  ungroup() %>% 
+  mutate(Year = year(date),
+         Over12 = ifelse(pm25 > 12, 1, 0))
+
+# of days over 12 plot
+Pacoima_dailyAvg_plot <- Pacoima_dailyAvg %>% 
+    group_by(Monitor_Name, Year) %>% 
+    count(Over12) %>% 
+    filter(Over12 == 1) %>% 
+    ungroup() %>% 
+    ggplot(aes(x = Monitor_Name, y = n, fill = factor(Year), group = factor(Year)))+
+    geom_bar(stat = 'identity', position = 'dodge', alpha = 0.8)+
+    geom_text(aes(group = factor(Year), label = n), position = position_dodge(width = .9),
+              hjust = 1.4, size = 5)+
+    scale_fill_manual(values = natparks.pals("Yellowstone", 2))+
+    coord_flip()+
+    labs(title = "Pacoima Monitors Days Over 12", y = "# of Days", x = "Monitors", fill = "Year")+
+    theme_bw(base_size = 14)+
+    theme(plot.title = element_text(hjust = 0.5))
+
+#load into jpeg format
+jpeg(file = "Pacoima_Over12_plot.jpeg",  width = 10, height = 8, units = 'in', res = 300)
+Pacoima_dailyAvg_plot
+dev.off()
+
+```
+
+# Time Series Plots
+
+```{r Pacoima Time Series}
+Pacoima_AQMD <- Pacoima %>%
+  select(Timestamp, Value) %>% 
+  rename(date = 1, pm25 = 2) %>% 
+  timeAverage(avg.time = "day") %>% 
+  ungroup() %>% 
+  mutate(type = "PurpleAir") %>% 
+  rbind(EPA_Reseda_DailySource %>%
+          select(-siteName) %>% 
+          filter(date > "2020-12-31") %>% 
+          mutate(type = "AQMD"))
+
+time_all_2021 <- ggplot(Pacoima_AQMD %>% 
+                     mutate(date = as.Date(date)) %>% 
+                     filter(date < "2022-01-01"), aes(x = date, y = pm25)) + 
+  geom_line(aes(color = type)) + 
+  scale_color_manual(name = "", labels = c("Reseda regulatory monitor (SC-AQMD)", " Pacoima PurpleAir sensors"),
+                     values = c("black", "mediumpurple")) + 
+  geom_hline(aes(yintercept = 12, linetype="Annual air quality standard (12 µg/m3)")) +
+  geom_hline(aes(yintercept = 35, linetype = "Daily air quality standard (35 µg/m3)")) +
+  scale_linetype_manual(name = "", values = c("dotted", "dashed")) +
+  scale_y_continuous(breaks = sort(c(seq(0, 60, by = 20), 12, 35)), limits = c(0,60)) +
+  scale_x_date(date_labels = "%b-%d") +
+  xlab("") + ylab("PM2.5 (µg/m3)") +
+  theme(legend.position = c(0.3, 0.75),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_text(size=14),
+        axis.text.y = element_text(size=14),
+        axis.title.x = element_text(size=14, face = "bold"),
+        axis.title.y = element_text(size=14, face = "bold"),
+        plot.title = element_text(size=16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size=14, hjust = 0.5))
+
+jpeg(file = "Pacoima_AQMD_all.jpeg",  width = 16, height = 8, units = 'in', res = 300)
+time_all_2021
+dev.off()
+
+```
+
+# Monthly Average Bar Charts
+```{r Pacoima Monthly Average}
+Pacoima_monthly <- Pacoima_dailyAvg %>% 
+    rbind(EPA_Reseda_DailySource %>% 
+              rename("Monitor_Name" = 1)) %>% 
+    mutate(Month = month(date), Year = year(date)) %>% 
+    timeAverage(avg.time = "month") %>% #, type = c("Monitor_Name")
+    arrange(date) %>% 
+  mutate(Month_abbv = format(date, "%b"))
+
+Pacoima_monthly %>% 
+    ggplot(aes(x = factor(Month), y = pm25, fill = factor(Year), group = factor(Year)))+
+    geom_bar(stat = "identity", position = "dodge", alpha = 0.8)+
+    geom_hline(aes(yintercept = 12, linetype = "Annual Air Quality Standard (12 µg/m3)"), color = "red", size = 1.09)+
+    geom_text(aes(group = factor(Year), label = round(pm25, 1)), position = position_dodge(width = 0.9),
+              vjust = 1.1, size = 5)+
+    scale_x_discrete(labels = c(unique(Pacoima_monthly$Month_abbv)))+
+    scale_fill_manual(values = natparks.pals("Yellowstone", 2))+
+    scale_linetype_manual(name = "", values = c("dashed"))+
+    labs(x = "Month", y = "Average PM2.5 (µg/m3)", title = "PM2.5 Monthly Averages", fill = "Year")+
+    theme_bw(base_size = 14)+
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+# Hourly Averages by Season
+
+```{r Pacoima Seasonal Hourly Averages}
+
+Pacoima_SeasonHourly <- Pacoima %>% 
+    mutate(Hour = hour(Timestamp),
+           Season = ifelse(month(Timestamp) > 5 & month(Timestamp) < 9, "Summer",
+                           ifelse(month(Timestamp) > 10 | month(Timestamp) == 1, "Winter", NA))) %>% 
+    filter(!is.na(Season)) %>% 
+    rename("date" = "Timestamp", "pm25" = "Value") %>% 
+    timeAverage(avg.time = "hour", type = c("Season")) %>% 
+    group_by(Season, Hour) %>% 
+    summarize(Avg = mean(pm25))
+
+Pacoima_SeasonHourly %>% 
+    ggplot(aes(x = factor(Hour), y = Avg, color = Season, group = Season))+
+    geom_line(size = 2)+
+    labs(x = "Hour", y = "Average PM2.5 (µg/m3)", title = "Hourly PM2.5 Averages by Season")+
+    scale_color_manual(values = natparks.pals("Yellowstone", 2))+
+    theme_bw(base_size = 14)+
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
